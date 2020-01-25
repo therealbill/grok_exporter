@@ -16,12 +16,16 @@ package v2
 
 import (
 	"fmt"
-	"github.com/fstab/grok_exporter/tailer/glob"
-	"github.com/fstab/grok_exporter/template"
-	"gopkg.in/yaml.v2"
+	"io/ioutil"
+	"log"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/fstab/grok_exporter/tailer/glob"
+	"github.com/fstab/grok_exporter/template"
+	"gopkg.in/yaml.v2"
 )
 
 const (
@@ -75,6 +79,7 @@ type InputConfig struct {
 type GrokConfig struct {
 	PatternsDir        string   `yaml:"patterns_dir,omitempty"`
 	AdditionalPatterns []string `yaml:"additional_patterns,omitempty"`
+	MetricsDir         string   `yaml:"metrics_dir,omitempty"`
 }
 
 type PathsAndGlobs struct {
@@ -120,7 +125,7 @@ func (cfg *Config) addDefaults() {
 	if cfg.Metrics == nil {
 		cfg.Metrics = MetricsConfig(make([]MetricConfig, 0))
 	}
-	cfg.Metrics.addDefaults()
+	cfg.Metrics.addDefaults(cfg)
 	cfg.Server.addDefaults()
 }
 
@@ -158,7 +163,65 @@ func (c *InputConfig) addDefaults() {
 
 func (c *GrokConfig) addDefaults() {}
 
-func (c *MetricsConfig) addDefaults() {}
+type MetricsReader struct {
+	MetricsDir string
+	Metrics    MetricsConfig
+}
+
+func (mr *MetricsReader) AddFile(filepath string) (int, error) {
+	//log.Printf("%s\n", string(file))
+	var metrics MetricsConfig
+	file, err := ioutil.ReadFile(filepath)
+	if err != nil {
+		log.Fatalf("Failed to read %v: %v", filepath, err.Error())
+	}
+	err = yaml.Unmarshal([]byte(file), &metrics)
+	if err != nil {
+		log.Fatalf("cannot unmarshal data: %v", err)
+	}
+	mr.Metrics = append(mr.Metrics, metrics...)
+	return len(metrics), err
+
+}
+
+func (mr *MetricsReader) AddDir(cfg *Config) (int, error) {
+	metricsread := 0
+	files, err := ioutil.ReadDir(cfg.Grok.MetricsDir)
+	if err != nil {
+		return metricsread, fmt.Errorf("Failed to read %v: %v", cfg.Grok.MetricsDir, err.Error())
+	}
+	for _, file := range files {
+		if strings.HasSuffix(file.Name(), ".yml") {
+			mrc, err := mr.AddFile(filepath.Join(cfg.Grok.MetricsDir, file.Name()))
+			if err != nil {
+				return metricsread, err
+			}
+			metricsread += mrc
+		}
+	}
+	return metricsread, err
+
+}
+
+func initMetrics(cfg *Config) (*MetricsConfig, error) {
+	var reader MetricsReader
+	if len(cfg.Grok.MetricsDir) > 0 {
+		cnt, err := reader.AddDir(cfg)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return &reader.Metrics, nil
+}
+
+func (c *MetricsConfig) addDefaults(cfg *Config) {
+	metrics, err := initMetrics(cfg)
+	if err != nil {
+		log.Fatalf("error eading metrics files: %s", err)
+	}
+	metrics_merged := append(*metrics, *c...)
+	*c = metrics_merged
+}
 
 func (c *ServerConfig) addDefaults() {
 	if c.Protocol == "" {
